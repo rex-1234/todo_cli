@@ -1,39 +1,70 @@
 """CLI entrypoint for the to-do application using argparse subcommands."""
 import argparse
-from json import JSONDecodeError
+import asyncio
 from task_manager import TaskManager
 
-def main():
+
+async def main():
     """Parse CLI arguments and dispatch to task operations."""
-    parser = argparse.ArgumentParser(description="Simple To-do list manager")
-    subparsers = parser.add_subparsers(dest="command", help="Command")
+    parser = argparse.ArgumentParser(description="Async To-do manager")
+    sub = parser.add_subparsers(dest="command")
 
-    # Add command
-    add_parser = subparsers.add_parser("add", help="Add a new task")
-    add_parser.add_argument("--title", required=True, help="Task title")
-    add_parser.add_argument("--due-date", required=True, help="Task due date in YYYY-MM-DD format")
+    # ADD
+    p_add = sub.add_parser("add")
+    p_add.add_argument("--title", required=True)
+    p_add.add_argument("--due-date", required=True)
 
-    # List command
-    subparsers.add_parser("list", help="List all tasks")
+    # ADD MULTIPLE (TaskGroup)
+    p_many = sub.add_parser("add-many")
+    p_many.add_argument("--items", nargs="+", required=True)
+    # Format: "title,2024-12-01" "Study,2024-01-10"
 
-    # Delete command
-    delete_parser = subparsers.add_parser("delete", help="Delete a task")
-    delete_parser.add_argument("--title", required=True, help="Task title to delete")
+    # LIST
+    sub.add_parser("list")
+
+    # DELETE ONE
+    p_del = sub.add_parser("delete")
+    p_del.add_argument("--title", required=True)
+
+    # DELETE MULTIPLE
+    p_del_many = sub.add_parser("delete-many")
+    p_del_many.add_argument("--titles", nargs="+", required=True)
 
     args = parser.parse_args()
     manager = TaskManager()
 
     try:
-        if args.command == "add":
-            manager.add_tasks(args.title, args.due_date)
-        elif args.command == "list":
-            manager.list_tasks()
-        elif args.command == "delete":
-            manager.delete_task(args.title)
-        else:
-            parser.print_help()
-    except (ValueError, JSONDecodeError, OSError) as e:
-        print(f"CLI error: {e}")
+        async with asyncio.TaskGroup() as tg:
+
+            # ADD
+            if args.command == "add":
+                tg.create_task(manager.add_tasks(args.title, args.due_date))
+
+            # ADD MANY
+            elif args.command == "add-many":
+                for item in args.items:
+                    title, date = item.split(",", 1)
+                    tg.create_task(manager.add_tasks(title, date))
+
+            # LIST
+            elif args.command == "list":
+                tg.create_task(manager.list_tasks())
+
+            # DELETE
+            elif args.command == "delete":
+                tg.create_task(manager.delete_task(args.title))
+
+            # DELETE MANY
+            elif args.command == "delete-many":
+                for title in args.titles:
+                    tg.create_task(manager.delete_task(title))
+
+            else:
+                parser.print_help()
+
+    except Exception as e:
+        print(f"Error in TaskGroup: {e}")
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

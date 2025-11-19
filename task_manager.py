@@ -2,6 +2,8 @@
 
 import json
 import os
+import asyncio
+import aiofiles
 import time
 import logging
 from logging.handlers import RotatingFileHandler
@@ -12,7 +14,7 @@ from functools import wraps
 # Ensure log directory exists
 os.makedirs("logs", exist_ok=True)
 
-# Create rotating file handler
+# Create rotating file handler (SYNC Logic)
 LOG_FILE = "logs/todo.log"
 handler = RotatingFileHandler(
     LOG_FILE,
@@ -31,89 +33,127 @@ logger.setLevel(logging.INFO)
 if not logger.hasHandlers():
     logger.addHandler(handler)
 
+# Async lock for safe file operations
+file_lock = asyncio.Lock()
 
+
+# --------------------------------------------------------
+# ASYNC DECORATOR
+# --------------------------------------------------------
 def safe_operation(func):
-    """Decorator to handle exceptions and log execution time."""
+    """Async decorator: handles errors, timing, and logging."""
     @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
+    async def wrapper(*args, **kwargs):
+        start = time.time()
         try:
-            result = func(*args, **kwargs)
+            result = await func(*args, **kwargs)
             logger.info(f"{func.__name__} executed successfully.")
             return result
         except FileNotFoundError:
-            print("Error: Task file not found. Please add a task first.")
+            print("Error: Task file not found.")
             logger.error(f"{func.__name__}: Task file missing.")
         except ValueError as e:
             print(f"Invalid input: {e}")
             logger.error(f"{func.__name__}: Invalid input: {e}")
         except Exception as e:
             print(f"Unexpected error: {e}")
-            logger.exception(f"{func.__name__}: failed with error: {e}")
+            logger.exception(f"{func.__name__} failed: {e}")
         finally:
-            elapsed = round(time.time() - start_time, 3)
+            elapsed = round(time.time() - start, 3)
             logger.info(f"{func.__name__} took {elapsed}s")
     return wrapper
 
 
+# --------------------------------------------------------
+# DATACLASS
+# --------------------------------------------------------
 @dataclass
 class Task:
     """Represents a to-do item with title, due date, and creation timestamp."""
     title: str
     due_date: str
-    created_at: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    created_at: str = field(default_factory=lambda:
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     @property
     def is_overdue(self):
         """Return True if the task's due date is before today."""
         today = datetime.now().date()
-        due = datetime.strptime(self.due_date, "%Y-%m-%d").date()
-        return due < today
+        due_date = datetime.strptime(self.due_date, "%Y-%m-%d").date()
+        return due_date < today
 
+
+# --------------------------------------------------------
+# ASYNC TASK MANAGER
+# --------------------------------------------------------
 class TaskManager:
     """Manage persistence and operations for tasks stored in a JSON file."""
     def __init__(self, storage_file="tasks.json"):
-        """Initialize the manager with a storage file and load tasks."""
-        self._storage_file = storage_file   # Private
-        self._tasks = self._load_tasks()
+        self._storage_file = storage_file   #Private attribute
 
-    def _load_tasks(self):
-        """Load and return tasks list from disk; return an empty list if missing."""
+    async def _load_tasks(self):
+        """Async load tasks with lock and return tasks list from disk; return an empty list if missing."""
         try:
-            with open(self._storage_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+            async with file_lock:
+                async with aiofiles.open(self._storage_file, "r") as f:
+                    data = await f.read()
+                    return json.loads(data) if data else []
         except FileNotFoundError:
             return []
 
-    def _save_tasks(self):
-        """Persist current tasks list to disk in pretty-printed JSON."""
-        with open(self._storage_file, "w", encoding="utf-8") as f:
-            json.dump(self._tasks, f, indent=4)
+    async def _save_tasks(self, tasks):
+        """Async save tasks and Persist current tasks list to disk in pretty-printed JSON."""
+        async with file_lock:
+            async with aiofiles.open(self._storage_file, "w") as f:
+                await f.write(json.dumps(tasks, indent=4))
 
+    # ----------------------------------------------------
     @safe_operation
-    def add_tasks(self, title, due_date):
+    async def add_tasks(self, title, due_date):
         """Create a new task and save it to storage."""
-        new_task = Task(title, due_date)
-        self._tasks.append(new_task.__dict__)
-        self._save_tasks()
+        async with file_lock:
+            async with aiofiles.open(self._storage_file, "r") as f:
+                data = await f.read()
+                tasks = json.loads(data) if data else []
+
+            new_task = Task(title, due_date)
+            tasks.append(new_task.__dict__)
+
+            async with aiofiles.open(self._storage_file, "w") as f:
+                await f.write(json.dumps(tasks, indent=4))
+
         print(f"Task '{title}' added successfully.")
 
+    # ----------------------------------------------------
     @safe_operation
-    def list_tasks(self):
+    async def list_tasks(self):
         """Print all tasks with due date and overdue status."""
-        if not self._tasks:
-            print("No tasks found")
-        for t in self._tasks:
-            task = Task(**t)
-            status = "!! Overdue" if task.is_overdue else "On track"
-            print(f"- {t['title']} (Due: {t['due_date']}) -> {status}")
-
-    @safe_operation
-    def delete_task(self, title_to_delete):
-        """Delete a task by its title and persist the change."""
-        if not self._tasks:
+        tasks = await self._load_tasks()
+        if not tasks:
             print("No tasks found")
             return
-        self._tasks = [task for task in self._tasks if task['title'] != title_to_delete]
-        self._save_tasks()
+
+        for t in tasks:
+            task = Task(**t)
+            status = "!! Overdue" if task.is_overdue else "On track"
+            print(f"- {task.title} (Due: {task.due_date}) -> {status}")
+
+    # ----------------------------------------------------
+    @safe_operation
+    async def delete_task(self, title_to_delete):
+        """Delete a task by its title and persist the change."""
+        async with file_lock:
+            async with aiofiles.open(self._storage_file, "r") as f:
+                data = await f.read()
+                tasks = json.loads(data) if data else []
+
+            updated = [t for t in tasks if t["title"] != title_to_delete]
+
+            if len(updated) == len(tasks):
+                print("Task not found")
+                return
+
+            async with aiofiles.open(self._storage_file, "w") as f:
+                await f.write(json.dumps(updated, indent=4))
+
         print(f"Task '{title_to_delete}' deleted successfully.")
