@@ -33,9 +33,6 @@ logger.setLevel(logging.INFO)
 if not logger.hasHandlers():
     logger.addHandler(handler)
 
-# Async lock for safe file operations
-file_lock = asyncio.Lock()
-
 
 # --------------------------------------------------------
 # ASYNC DECORATOR
@@ -90,37 +87,33 @@ class TaskManager:
     """Manage persistence and operations for tasks stored in a JSON file."""
     def __init__(self, storage_file="tasks.json"):
         self._storage_file = storage_file   #Private attribute
+        # Async lock for safe file operations
+        self._lock = asyncio.Lock()
 
     async def _load_tasks(self):
         """Async load tasks with lock and return tasks list from disk; return an empty list if missing."""
         try:
-            async with file_lock:
-                async with aiofiles.open(self._storage_file, "r") as f:
-                    data = await f.read()
-                    return json.loads(data) if data else []
+            async with aiofiles.open(self._storage_file, "r") as f:
+                data = await f.read()
+                return json.loads(data) if data else []
         except FileNotFoundError:
             return []
 
+
     async def _save_tasks(self, tasks):
         """Async save tasks and Persist current tasks list to disk in pretty-printed JSON."""
-        async with file_lock:
-            async with aiofiles.open(self._storage_file, "w") as f:
-                await f.write(json.dumps(tasks, indent=4))
+        async with aiofiles.open(self._storage_file, "w") as f:
+            await f.write(json.dumps(tasks, indent=4))
 
     # ----------------------------------------------------
     @safe_operation
     async def add_tasks(self, title, due_date):
         """Create a new task and save it to storage."""
-        async with file_lock:
-            async with aiofiles.open(self._storage_file, "r") as f:
-                data = await f.read()
-                tasks = json.loads(data) if data else []
-
+        async with self._lock:
+            tasks = await self._load_tasks()
             new_task = Task(title, due_date)
             tasks.append(new_task.__dict__)
-
-            async with aiofiles.open(self._storage_file, "w") as f:
-                await f.write(json.dumps(tasks, indent=4))
+            await self._save_tasks(tasks)
 
         print(f"Task '{title}' added successfully.")
 
@@ -142,18 +135,14 @@ class TaskManager:
     @safe_operation
     async def delete_task(self, title_to_delete):
         """Delete a task by its title and persist the change."""
-        async with file_lock:
-            async with aiofiles.open(self._storage_file, "r") as f:
-                data = await f.read()
-                tasks = json.loads(data) if data else []
-
+        async with self._lock:
+            tasks = await self._load_tasks()
             updated = [t for t in tasks if t["title"] != title_to_delete]
 
             if len(updated) == len(tasks):
                 print("Task not found")
                 return
 
-            async with aiofiles.open(self._storage_file, "w") as f:
-                await f.write(json.dumps(updated, indent=4))
+            await self._save_tasks(updated)
 
         print(f"Task '{title_to_delete}' deleted successfully.")
